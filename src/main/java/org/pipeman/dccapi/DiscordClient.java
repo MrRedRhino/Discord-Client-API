@@ -2,25 +2,63 @@ package org.pipeman.dccapi;
 
 import org.json.JSONObject;
 import org.pipeman.dccapi.events.EventEmitter;
+import org.pipeman.dccapi.events.Listener;
+import org.pipeman.dccapi.events.ws.DisconnectedEvent;
+import org.pipeman.dccapi.events.ws.LoggedInEvent;
 import org.pipeman.dccapi.wrappers.MessageAuthor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.Timer;
+import java.util.TimerTask;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class DiscordClient {
-    private final DCConnection connection;
+    private DCConnection connection;
     private final EventEmitter eventEmitter = new EventEmitter();
     private final HttpClient HTTP = HttpClient.newHttpClient();
     private final String token;
     private long accountID = 0;
+    private long reconnectDelay = 1;
+    private final AtomicBoolean waitingToReconnect = new AtomicBoolean(false);
+    private final Logger LOGGER = LoggerFactory.getLogger(DiscordClient.class);
+    private boolean disconnected = false;
 
     private DiscordClient(String token) {
         this.token = token;
         connection = new DCConnection(token, eventEmitter, l -> accountID = l);
         connection.connect();
+
+        getEventEmitter().addListener(new Listener() {
+            @Override
+            public void onDisconnected(DisconnectedEvent event) {
+                if (disconnected) return;
+                LOGGER.warn("Got disconnected. Reconnecting in {}s", reconnectDelay);
+
+                waitingToReconnect.set(true);
+                new Timer(true).schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        if (waitingToReconnect.getAndSet(false)) {
+                            connection = new DCConnection(token, eventEmitter, l -> accountID = l);
+                            connection.connect();
+                        }
+                    }
+                }, reconnectDelay * 1000);
+
+                reconnectDelay = Math.min(60, reconnectDelay * 2);
+            }
+
+            @Override
+            public void onLogin(LoggedInEvent event) {
+                reconnectDelay = 1;
+            }
+        });
     }
 
     public static DiscordClient connect(String token) {
@@ -32,6 +70,7 @@ public class DiscordClient {
     }
 
     public void disconnect() {
+        disconnected = true;
         connection.close();
     }
 
